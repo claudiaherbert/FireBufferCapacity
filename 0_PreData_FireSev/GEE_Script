@@ -1,0 +1,493 @@
+//############################################################
+// Generating Fire Severity, NDMI, and SAVI images for fires
+// Author: Claudia Herbert
+// Last Update: 2022.02.06 
+// This script is the combination of original code and code shared from Parks et al. 2018 
+//############################################################
+
+// Start 
+// edit the box below for each fire
+//------------------------------
+var year = "2003";
+var fireName = "SIMI";
+var alarm_month = "1025" 
+var alarm_date = ee.Date.parse('YYYY-M-d', '2003-10-25')
+// var acres = 409.239 // Somtimes this is needed if the fire is one of many with same name
+//------------------------------
+
+// don't change this unless you change for all outputs
+// this is the number of months you would like to put the initial assessment for post-fire image
+var initial_assess = 1.5
+var pre_assess = -1.5
+var lag_6 = -6 
+var lag_3 = -3 
+var lag_1 = -1
+var lagP_1 = 1 
+var lagP_3 = 3
+
+
+// ###########
+// Don't edit the section below: 
+// ###########
+
+var fires = ee.FeatureCollection('users/claudiaherbert/Firesp_20_1_update3').filter(ee.Filter.stringContains('YEAR_', year))
+            .filter(ee.Filter.stringStartsWith('FIRE_NAME', fireName))
+            // .filter(ee.Filter.eq('GIS_ACRES', acres))
+            // .filter(ee.Filter.eq('CAUSE', 2)) // again, these are additional ways of identifying the fire you want
+            .set('system:id', fireName)
+
+var golf_course = ee.FeatureCollection('users/claudiaherbert/GolfCourse_FiresOverlapQuar_20211013').filter(ee.Filter.stringContains('FIRE_NAME', fireName))
+
+Map.addLayer(golf_course, {}, 'golf course')
+
+
+// need to rename my fires using the proper IDs (Year and Fire_ID)
+var fires = fires.map(function(feat){
+  return ee.Feature(feat.geometry(),{ 
+    'system:index': fireName,
+    Fire_ID: feat.get('GIS_ACRES'),
+    Fire_ID_1: feat.get('AGENCY'),
+    Year:  year, // feat.get('Year'), // .format("Y"),
+    Date: ee.Date.parse('YYYYMMDD', year + alarm_month),
+    Name: feat.get('FIRE_NAME') 
+  }) ;
+});
+
+print('added :', fires)
+
+// specify fire severity metrics to create
+var bandList = ['dnbr_w_offset', 'rbr_w_offset', 'rdnbr_w_offset'];
+var bandList2 = ['NDMI_6', 'NDMI_3', "NDMI_1"] // "NDMI_P1",  "NDMI_P1", "NDMI_P3"
+var bandList3 = ['SAVI']
+
+
+//  visualize fire perimeters
+Map.setCenter(-115,41.5, 5);
+Map.addLayer(fires, {color: 'Red'}, "Fire perimeters");
+
+
+// //--------------------     PROCESSING     ----------------------------//
+// //-------- Initialize variables for fire perimeters  -----------------//
+// create two lists: one with fire names and the other with fire IDs 
+var fireID  = ee.List(fires.aggregate_array('Name')).getInfo()
+var nFires = fireID.length;
+
+print(fireID)
+print(nFires)
+print(fires)
+
+//------------------- Image Processing for Fires Begins Here -------------//
+// Landsat 5, 7, and 8 Surface Reflectance Tier 1 collections
+var ls8SR = ee.ImageCollection('LANDSAT/LC08/C01/T1_SR'),
+    ls7SR = ee.ImageCollection('LANDSAT/LE07/C01/T1_SR'),
+    ls5SR = ee.ImageCollection('LANDSAT/LT05/C01/T1_SR'),
+    ls4SR = ee.ImageCollection('LANDSAT/LT04/C01/T1_SR');
+
+/////////////////////////////////
+// FUNCTIONS TO CREATE NBR
+/////////////////////////////////
+
+// Returns vegetation indices for LS8
+var ls8_Indices = function(lsImage){
+  var nbr = lsImage.normalizedDifference(['B5', 'B7']).toFloat();
+  var qa = lsImage.select(['pixel_qa']);
+  return nbr.addBands([qa])
+          .select([0,1], ['nbr', 'pixel_qa'])
+          .copyProperties(lsImage, ['system:time_start']);
+  };
+  
+// Returns vegetation indices for LS4, LS5 and LS7
+var ls4_7_Indices = function(lsImage){
+  var nbr = lsImage.normalizedDifference(['B4', 'B7']).toFloat();
+  var qa = lsImage.select(['pixel_qa']);
+  return nbr.addBands([qa])
+          .select([0,1], ['nbr', 'pixel_qa'])
+          .copyProperties(lsImage, ['system:time_start']);
+  };
+
+// Mask Landsat surface reflectance images
+// Creates a mask for clear pixels 
+var lsCfmask = function(lsImg){
+  var quality =lsImg.select(['pixel_qa']);
+  var clear = quality.bitwiseAnd(8).eq(0) // cloud shadow
+                .and(quality.bitwiseAnd(32).eq(0) // cloud
+                .and(quality.bitwiseAnd(4).eq(0) // water
+                .and(quality.bitwiseAnd(16).eq(0)))); // snow
+  return lsImg.updateMask(clear).select([0])                                    
+            .copyProperties(lsImg, ['system:time_start']);
+};
+
+// Map functions across Landsat Collections
+var ls8 = ls8SR.map(ls8_Indices)
+                .map(lsCfmask);
+var ls7 = ls7SR.map(ls4_7_Indices)
+                .map(lsCfmask); 
+var ls5 = ls5SR.map(ls4_7_Indices)
+                .map(lsCfmask); 
+var ls4 = ls4SR.map(ls4_7_Indices)
+                .map(lsCfmask); 
+                  
+// Merge Landsat Collections
+var lsCol = ee.ImageCollection(ls8.merge(ls7).merge(ls5).merge(ls4));
+
+  
+  // create pre- and post-fire NBR imagery
+var fireYear = year; // fire.get('Date')
+var fireYear = alarm_date
+var preFireYear = alarm_date.advance(pre_assess, 'month');
+var postFireYear = alarm_date.advance(initial_assess, 'month')
+print(postFireYear)
+print('alarm date:', alarm_date)
+print('pre-fire date:', preFireYear)
+
+// ------------------ Create and Export Fire Severity Imagery for each fire -----------------//
+var indices = ee.ImageCollection(fires.map(function(ft){
+  // use 'Fire_ID' as unique identifier
+  var fName = ft.get("Fire_ID");
+
+  // select fire
+  var fire = ft;
+  var fireBounds = ft.geometry().bounds();
+  
+  // create pre- and post-fire NBR imagery
+  var fireYear = alarm_date
+  var preFireYear = alarm_date.advance(pre_assess, 'month');
+  var preFireIndices = lsCol.filterBounds(fireBounds)
+                          .filterDate(preFireYear, alarm_date)
+                          .mean()
+                          .rename('preNBR');
+  var postFireYear = alarm_date.advance(initial_assess, 'month');
+  // var postAlarmPeriod = alarm_date.advance(initial_assess - 2, 'month');
+  var postFireIndices = lsCol.filterBounds(fireBounds)
+                          .filterDate(alarm_date, postFireYear) // postAlarmPeriod
+                          .mean()
+                          .rename('postNBR');
+
+  var fireIndices = preFireIndices.addBands(postFireIndices);
+  
+  // create fire severity indices    
+  // calculate dNBR  
+  var burnIndices = fireIndices.expression(
+              "(b('preNBR') - b('postNBR')) * 1000")
+              .rename('dnbr').toFloat().addBands(fireIndices);
+
+  // calculate dNBR with Offset developed from 180-m ring outside the fire perimeter
+  var ring   = fire.buffer(180).difference(fire);
+  var burnIndices2 = ee.Image.constant(ee.Number(burnIndices.select('dnbr').reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: ring.geometry(),
+      scale: 30,
+      maxPixels: 1e9
+    }).get('dnbr'))).rename('offset').toFloat().addBands(burnIndices); 
+
+  var burnIndices3 = burnIndices2.expression(
+            "b('dnbr') - b('offset')").
+            rename('dnbr_w_offset').toFloat().addBands(burnIndices2);
+
+  // calculate RBR  
+  var burnIndices4 = burnIndices3.expression(
+            "b('dnbr') / (b('preNBR') + 1.001)")
+            .rename('rbr').toFloat().addBands(burnIndices3);
+  
+  // calculate RBR with offset
+  var burnIndices5 = burnIndices4.expression(
+            "b('dnbr_w_offset') / (b('preNBR') + 1.001)")
+            .rename('rbr_w_offset').toFloat().addBands(burnIndices4);
+
+  // calculate RdNBR
+  var burnIndices6 = burnIndices5.expression(
+    "abs(b('preNBR')) < 0.001 ? 0.001" + 
+            ": b('preNBR')")
+      .sqrt().rename('preNBR2').toFloat().addBands(burnIndices5);
+
+  var burnIndices7 = burnIndices6.expression(
+     "b('dnbr') / b('preNBR2')")
+    .rename('rdnbr').toFloat().addBands(burnIndices6);
+
+  // calculate RdNBR with offset
+  var burnIndices8 = burnIndices7.expression(
+            "b('dnbr_w_offset') / b('preNBR2')")
+            .rename('rdnbr_w_offset').toFloat().addBands(burnIndices7);
+
+  burnIndices8 = burnIndices8.select(bandList);
+  return burnIndices8.set({
+                        'fireID' : ft.get('AGENCY'),
+                        'fireName' : ft.get('Name'),
+                        'fireYear' : ft.get('Date'), 
+                        'system:id': ft.get('AGENCY')
+  }); 
+}));
+
+
+// // Export fire indices for each fire  
+var fireExport = indices.first();
+var fireBounds = fires.geometry().bounds();
+var nBands = bandList.length;
+  for (var i = 0; i < nBands; i++) {
+    var bandExport = bandList[i];  
+    var exportImg = fireExport.select(bandExport);
+    Export.image.toAsset({
+      image: exportImg,
+      assetId: "InitialBurnSev_v2/" + fireID + '_' + bandExport + "_" + year,
+      description: fireID + '_' + bandExport + "_" + year,
+      maxPixels: 1e13,
+      scale: 30,
+      crs: "EPSG:4326",
+      region: fireBounds
+  }); 
+  }
+
+Map.addLayer(fireExport.clip(fireBounds), imageVisParam2, 'NBR')
+
+
+
+//####################################################
+//                      NDMI 
+//####################################################
+
+// Returns vegetation indices for LS8
+var ls8_Indices = function(lsImage){
+  var ndmi = lsImage.normalizedDifference(['B5', 'B6']).toFloat();
+  var qa = lsImage.select(['pixel_qa']);
+  return ndmi.addBands([qa])
+          .select([0,1], ['ndmi', 'pixel_qa'])
+          .copyProperties(lsImage, ['system:time_start']);
+  };
+  
+// Returns vegetation indices for LS4, LS5 and LS7
+var ls4_7_Indices = function(lsImage){
+  var ndmi = lsImage.normalizedDifference(['B4', 'B5']).toFloat();
+  var qa = lsImage.select(['pixel_qa']);
+  return ndmi.addBands([qa])
+          .select([0,1], ['ndmi', 'pixel_qa'])
+          .copyProperties(lsImage, ['system:time_start']);
+  };
+
+// Mask Landsat surface reflectance images
+// Creates a mask for clear pixels 
+var lsCfmask = function(lsImg){
+  var quality =lsImg.select(['pixel_qa']);
+  var clear = quality.bitwiseAnd(8).eq(0) // cloud shadow
+                .and(quality.bitwiseAnd(32).eq(0) // cloud
+                .and(quality.bitwiseAnd(4).eq(0) // water
+                .and(quality.bitwiseAnd(16).eq(0)))); // snow
+  return lsImg.updateMask(clear).select([0])                                    
+            .copyProperties(lsImg, ['system:time_start']);
+};
+
+// Map functions across Landsat Collections
+var ls8 = ls8SR.map(ls8_Indices)
+                .map(lsCfmask);
+var ls7 = ls7SR.map(ls4_7_Indices)
+                .map(lsCfmask); 
+var ls5 = ls5SR.map(ls4_7_Indices)
+                .map(lsCfmask); 
+var ls4 = ls4SR.map(ls4_7_Indices)
+                .map(lsCfmask); 
+                  
+// Merge Landsat Collections
+var lsCol = ee.ImageCollection(ls8.merge(ls7).merge(ls5).merge(ls4));
+
+
+// ------------------ Create and Export Fire Severity Imagery for each fire -----------------//
+var waterIndices = ee.ImageCollection(fires.map(function(ft){
+  // use 'Fire_ID' as unique identifier
+  var fName = ft.get("Fire_ID");
+
+  // select fire
+  var fire = ft;
+  var fireBounds = ft.geometry().bounds();
+  // var stateBounds = ee.FeatureCollection("TIGER/2018/Counties").filter(ee.Filter.eq('STATEFP', '06')).geometry().bounds();
+
+  // create pre- and post-fire NBR imagery
+  var preLag_1 = alarm_date.advance(lag_1, 'month');
+  var preFireNDMI_1 = lsCol.filterBounds(fireBounds)
+                          .filterDate(preLag_1, alarm_date)
+                          .mean()
+                          .rename('NDMI_1');
+  
+  // create pre- and post-fire NBR imagery
+  var preLag_3 = alarm_date.advance(lag_3, 'month');
+  var preFireNDMI_3 = lsCol.filterBounds(fireBounds)
+                          .filterDate(preLag_3, preLag_1)
+                          .mean()
+                          .rename('NDMI_3');
+                          
+  var preLag_6 = alarm_date.advance(lag_6, 'month');
+  // var startLag_3 = alarm_date.advance(lag_6 - lag_3, 'month');
+  var preFireNDMI_6 = lsCol.filterBounds(fireBounds)
+                          .filterDate(preLag_6, preLag_3) // startLag_3
+                          .mean()
+                          .rename('NDMI_6');
+                          
+  var postLag_1 = alarm_date.advance(lagP_1, 'month');
+  // creating a post fire NDMI at one month in advance
+  var postFire_NDMI_1 = lsCol.filterBounds(fireBounds)
+                          .filterDate(alarm_date, postLag_1) 
+                          .mean()
+                          .rename('NDMI_P1');
+                          
+  var postLag_3 = alarm_date.advance(lagP_3, 'month');
+  // creating a post fire NDMI at three month in advance
+  var postFire_NDMI_3 = lsCol.filterBounds(fireBounds)
+                          .filterDate(postLag_1, postLag_3) 
+                          .mean()
+                          .rename('NDMI_P3');
+                          
+
+  var waterIndices = preFireNDMI_1.addBands(preFireNDMI_3).addBands(preFireNDMI_6).addBands(postFire_NDMI_1).addBands(postFire_NDMI_3);
+  waterIndices = waterIndices.select(bandList2);
+
+  return waterIndices.set({
+                        'fireID' : ft.get('AGENCY'),
+                        'fireName' : ft.get('Name'),
+                        'fireYear' : ft.get('Date'), 
+  }); 
+}));
+
+// // Export NDMI at different lags for the state
+// var stateBounds = ee.FeatureCollection("TIGER/2018/Counties").filter(ee.Filter.eq('STATEFP', '06')).geometry().bounds();
+var waterExport = waterIndices.first();
+var fireBounds = fires.geometry().bounds();
+var nBands = bandList2.length;
+  for (var i = 0; i < nBands; i++) {
+    var bandExport2 = bandList2[i];  
+    var exportImg_2 = waterExport.select(bandExport2);
+    Export.image.toAsset({
+      image: exportImg_2,
+      assetId: "NDMI_v2/" + fireID + "_" + bandExport2 + "_" + year,
+      description: fireID + "_" + bandExport2 + "_" + year,
+      maxPixels: 1e13,
+      scale: 30,
+      crs: "EPSG:4326",
+      region: fireBounds
+  }); 
+  }
+
+print('number of water bands:', nBands)
+
+
+
+//####################################################
+
+var imageVisParam = {"opacity":1,"bands":["dnbr_w_offset"],"min":-83.74727602931448,"max":45.87013191241188,"gamma":1},
+    imageVisParam6 = {"opacity":1,"bands":["NDMI_6"],"min":-0.1521313541397052,"max":0.009443184901157461,"gamma":1},
+    imageVisParam2 = {"opacity":1,"bands":["dnbr_w_offset"],"min":-160.0434828253092,"max":231.79498581603187,"gamma":1};
+
+var test = waterIndices.first() //filterMetadata('fireID', 'equals', "RAINBOW")
+print(test)
+
+// Map.addLayer(preFireNDMI_6.clip(fireBounds), imageVisParam6, '6')
+// Map.addLayer(test.clip(fireBounds), imageVisParam3, '3')
+
+//####################################################
+// END of SECTION
+//####################################################
+
+
+
+
+//####################################################
+//                 Post-fire SAVI 
+//####################################################
+
+// Returns SAVI for LS8
+// ((NIR - R) / (NIR + R + L)) * (1 + L)
+// ((Band 5 – Band 4) / (Band 5 + Band 4 + 0.5)) * (1.5)
+var ls8_Indices = function(lsImage){
+  var savi = lsImage.expression(
+    "((b('B5') - b('B4')) / (b('B5') + b('B4') + 0.5)) * (1.5)")
+    .rename('savi').toFloat();
+  var qa = lsImage.select(['pixel_qa']);
+  return savi.addBands([qa])
+          .select([0,1], ['savi', 'pixel_qa'])
+          .copyProperties(lsImage, ['system:time_start']);
+  };
+  
+// Returns SAVI for LS4, LS5 and LS7
+// (('B4' – 'B3') / ('B4' + 'B3' + 0.5)) * (1.5)
+var ls4_7_Indices = function(lsImage){
+  var savi = lsImage.expression(
+    "((b('B4') - b('B3')) / (b('B4') + b('B3') + 0.5)) * (1.5)")
+    .rename('savi').toFloat();
+  var qa = lsImage.select(['pixel_qa']);
+  return savi.addBands([qa])
+          .select([0,1], ['savi', 'pixel_qa'])
+          .copyProperties(lsImage, ['system:time_start']);
+  };
+
+// Mask Landsat surface reflectance images
+// Creates a mask for clear pixels 
+var lsCfmask = function(lsImg){
+  var quality =lsImg.select(['pixel_qa']);
+  var clear = quality.bitwiseAnd(8).eq(0) // cloud shadow
+                .and(quality.bitwiseAnd(32).eq(0) // cloud
+                .and(quality.bitwiseAnd(4).eq(0) // water
+                .and(quality.bitwiseAnd(16).eq(0)))); // snow
+  return lsImg.updateMask(clear).select([0])                                    
+            .copyProperties(lsImg, ['system:time_start']);
+};
+
+// Map functions across Landsat Collections
+var ls8 = ls8SR.map(ls8_Indices)
+                .map(lsCfmask);
+var ls7 = ls7SR.map(ls4_7_Indices)
+                .map(lsCfmask); 
+var ls5 = ls5SR.map(ls4_7_Indices)
+                .map(lsCfmask); 
+var ls4 = ls4SR.map(ls4_7_Indices)
+                .map(lsCfmask); 
+                  
+// Merge Landsat Collections
+var lsCol = ee.ImageCollection(ls8.merge(ls7).merge(ls5).merge(ls4));
+
+
+// ------------------ Create and Export Fire Severity Imagery for each fire -----------------//
+var savi_init = ee.ImageCollection(fires.map(function(ft){
+  // use 'Fire_ID' as unique identifier
+  var fName = ft.get("Fire_ID");
+
+  // select fire
+  var fire = ft;
+  var fireBounds = ft.geometry().bounds();
+
+  // create pre- and post-fire NBR imagery
+  var saviInit = alarm_date.advance(initial_assess, 'month');
+  var savi_init = lsCol.filterBounds(fireBounds)
+                          .filterDate(alarm_date, saviInit)
+                          .mean()
+                          .rename('SAVI');
+                          
+  savi_init = savi_init.select(bandList3);
+
+  return savi_init.set({
+                        'fireID' : ft.get('AGENCY'),
+                        'fireName' : ft.get('Name'),
+                        'fireYear' : ft.get('Date'), 
+  }); 
+}));
+
+// // Export NDMI at different lags for the state
+var savi_init = savi_init.first();
+var fireBounds = fires.geometry().bounds();
+var nBands = bandList3.length;
+  for (var i = 0; i < nBands; i++) {
+    var bandExport3 = bandList3[i];  
+    var exportImg_3 = savi_init.select(bandExport3);
+    Export.image.toAsset({
+      image: exportImg_3,
+      assetId: "SAVI_v2/" + fireID + "_" + bandExport3 + "_" + year,
+      description: fireID + "_" + bandExport3 + "_" + year,
+      maxPixels: 1e13,
+      scale: 30,
+      crs: "EPSG:4326",
+      region: fireBounds
+  }); 
+  }
+
+print("SAVI:", savi_init)
+
+Map.addLayer(savi_init.clip(fireBounds), {}, 'trial')
+var saviInit = alarm_date.advance(initial_assess, 'month'); 
+print('this is the SAVI date:', saviInit)
+
