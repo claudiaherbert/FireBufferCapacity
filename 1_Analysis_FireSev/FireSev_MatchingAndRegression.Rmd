@@ -1,0 +1,467 @@
+---
+title: "FireSev_MatchingAndRegression"
+author: "Claudia Herbert"
+date: "2/6/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, include=FALSE}
+# read in packages 
+# If you have not installed these packages already, you will need to do so
+# install.packages("<insert package name>")
+library(readr)
+library(dplyr)
+library(MatchIt)
+library(Matching)
+library(lmtest)
+library(margins)
+library(sjPlot)
+library(ggplot2)
+# install.packages("gplots")
+library(gplots)
+```
+
+## Read in files
+```{r}
+med <- read.csv('E:/BufferCapacity/Matching_CSV/GolfCourseSamplesMatching_CH_20220107_v01.csv')
+
+library(data.table)
+file.list <- list.files(path = "E:/BufferCapacity/Grid_Points_100_v3_mtbs", pattern='*.csv', full.names = TRUE)
+mtbs_list <- lapply(file.list, read.csv)
+mtbs_comb <- rbindlist(mtbs_list)
+```
+
+## Start organizing data
+
+```{r}
+med_treat <- med %>%
+    filter(group > 0) %>%
+    mutate(treat_log = "TRUE")
+    
+med_control <- med %>%
+    filter(group == 0) %>%
+    mutate(treat_log = "FALSE")
+
+# recombine the data with their logical variable
+med_log <- rbind(med_treat, med_control) %>% 
+    mutate(treat_log = as.logical(treat_log))
+
+# check the averages between treatment and control 
+med %>% 
+  group_by(GIS_ACRES, group) %>%
+  summarize(mean = mean(dnbr_w_offset))
+```
+
+Calculate the northness, eastness, and make non-continous variables factors
+```{r}
+med_log[, 'northness'] <- cos(med_log[, 'aspect'])
+med_log[, 'eastness'] <- sin(med_log[, 'aspect'])
+med_log[, 'landcover'] <- as.factor(as.character(med_log[, 'landcover']))
+med_log[, 'fire_id'] <- as.factor(med_log[, 'GIS_ACRES'])
+med_log[, 'year'] <- as.factor(med_log[, 'year'])
+med_log[, 'treat'] <- as.factor(med_log[, 'group'])
+```
+
+```{r}
+med_2 <- med_log %>%
+  dplyr::select(-'group', -'aspect', -'GIS_ACRES', -'system.index')  # dropping rows
+
+med_case <- med_2 %>%
+   janitor::clean_names(., "snake")
+
+med_case_complete <- med_case[complete.cases(med_case), ] # 363843, didn't change number (good)
+
+
+# adding a variable to the golf courses
+med_case_complete <- med_case_complete %>%
+  mutate(region = ifelse(fire_id == '3990.91', 'south', # BEDFORD
+                  ifelse(fire_id == '107570', 'south', # SIMI 
+                   ifelse(fire_id == '390.053', 'northwest', # SIXTEEN
+                   ifelse(fire_id == '409.239', 'northeast',# (missing name)
+                   ifelse(fire_id == '786.431', 'northwest', #HUMMINGBIRD
+                   ifelse(fire_id == '2429.39', 'south', # WEIRICK
+                   ifelse(fire_id == '2694.48', 'south', # RAINBOW
+                   ifelse(fire_id == '4080.61', 'south', # LILAC
+                   ifelse(fire_id == '7733.2', 'south', # SLU-730
+                   ifelse(fire_id == '13618.1', 'south', # SHEKELL
+                   ifelse(fire_id == '14337.8','south', #LAGUNA FIRE
+                   ifelse(fire_id == '15619.1', 'south', # CREEK
+                   ifelse(fire_id == '17819.7', 'south', # GUEJIUTO
+                   ifelse(fire_id == '23344.3', 'northwest', # HUMBOLDT
+                   ifelse(fire_id == '36702', 'northwest', # TUBBS
+                   ifelse(fire_id == '67484.3', 'northwest', #GLASS
+                   ifelse(fire_id == '76084.8', 'northwest', # VALLEY
+                   ifelse(fire_id == '86553.5', 'northwest', # CZU LIGHTNING COMPLEX
+                   ifelse(fire_id == '96949', 'south', # WOOLSEY
+                   ifelse(fire_id == '153336', 'northeast', # CAMP
+                   ifelse(fire_id == '162070', 'south', # WITCH
+                   ifelse(fire_id == '270686', 'south', # CEDAR
+                        NA)))))))))))))))))))))))
+
+# Check one fire
+med_case_complete %>% 
+  filter(fire_id == '14337.8')
+  
+```
+
+## Define equations for matching and regression 
+```{r}
+# writing equations once to be consistent
+match_eq <- as.formula("treat_log ~ slope + eastness + northness + ndmi_6 + precipitation + precipitation_3 + latitude + income + landcover")
+regress_eq <- as.formula("dnbr_w_offset ~ treat + slope + latitude + ndmi_6 + precipitation_3 +  income + region + landcover + region:treat") 
+```
+
+## Start the PSM 
+```{r}
+# included all landcover and fire as an exact match
+
+m.out <- matchit(match_eq, data = med_case_complete,
+                  method = "nearest", replace = FALSE,
+                  exact = ~ fire_id + landcover, 
+                  caliper = .1)
+
+
+summary_matching <- summary(m.out, un = FALSE)
+```
+
+```{r}
+library(cobalt)
+# # subset the non-fire ID and landcover data 
+lovePlotMatched <- love.plot(m.out, stats = "mean.diffs", binary = "std", agg.fun = "range", sample.names = c("Unmatched", "Matched"),  colors = c("black", "darkblue"))
+
+df_matching <- lovePlotMatched[[1]] %>% 
+  slice(75:90)
+
+df_matching %>% 
+  ggplot(aes(x = stat, y = var, colour = Sample)) + 
+  geom_point() + 
+  xlab("Mean Difference Between Control and Treatment Group") + 
+  ylab("Matching Variable") + 
+  theme_minimal() +
+  scale_color_manual(values = c("black", "blue")) + 
+  geom_vline(xintercept = 0, linetype="dotted")
+  
+
+
+ggsave("E:/BufferCapacity/figures/Fig2.jpeg",  
+       width =7,
+       height = 4,
+       units = c("in"),
+       dpi = 500)
+```
+
+
+```{r}
+library("MatchIt")
+
+matched_df <- match.data(m.out)
+
+test_dt <- match.data(m.out)
+fit1 <- lm(regress_eq, data = matched_df, weights = weights)
+
+summary(fit1)
+```
+
+```{r}
+library(emmeans)
+library(margins)
+
+# running the margins on the treatment 
+(m <- margins(fit1, variables = "treat")) # this is -85 treatment effect
+# using a different approach, this is another way to get the data using the cplot data
+table_main <-  cplot(fit1,"treat",what = "prediction")[] # this is from the margins package
+# this plot confirms that we see a 85 dnbr reduction on the treatment
+
+# using this table, we can make a better-looking plot
+table_main %>% 
+  ggplot(aes(x = xvals, y = yvals)) + 
+  geom_dotplot(binaxis='y', stackdir='center', dotsize=1, fill = c("#b5b37d", "#90bf78"), color = c("#b5b37d", "#90bf78")) +
+  theme_minimal() +
+  xlab("Modeled or Observed") + 
+  ylab("Continuous dNBR with offset burn severity") + 
+  scale_color_manual(labels = c("Control", "Golf Course"), values = c("#b5b37d", "#90bf78")) +
+  scale_x_discrete(labels=c("0" = "Control", "1" = "Treatment - Golf Course")) + 
+  ylim(c(0, 200))
+
+
+ggsave("E:/BufferCapacity/figures/Fig3_noBar.jpeg",  
+       width =7,
+       height = 4,
+       units = c("in"),
+       dpi = 500)
+
+region_tab <- emmeans::emmip(fit1, treat~region,CIs=TRUE)[[1]]
+
+tab_df(region_tab,
+       file = "E:/BufferCapacity/figures/region_marg.doc")
+
+region_tab %>% 
+  mutate(yvar = round(yvar, 2), 
+         SE = round(SE, 2), 
+         LCL = round(LCL, 2), 
+         UCL = round(UCL, 2))
+
+
+data.frame(region_tab) %>% 
+  ggplot(aes(y = yvar, x = region, colour = treat, fill = treat)) + 
+  geom_dotplot(binaxis='y', stackdir='center', dotsize=1)
+  
+emmeans::emmip(fit1, treat~region,CIs=TRUE,  linearg = list(alpha = 0)) + # make the lines not visible
+  theme_minimal() + 
+  xlab("Region") + 
+  ylab("Continuous dNBR with offset burn severity") + 
+  guides(color = guide_legend(title = "Experimental Group")) + 
+  scale_color_manual(labels = c("Control", "Treatment - Golf Course"), values = c("#b5b37d", "#90bf78"))
+
+
+ggsave("E:/BufferCapacity/figures/Regional_PredictedValues.png", dpi = 400, units = "in", width = 8, height = 5)
+```
+
+```{r}
+mtbs_reg1 <- mtbs_comb %>% 
+  janitor::clean_names(., "snake")
+
+trial_reg <- med_case_complete %>% 
+  dplyr::select(region, treat, elevation, savi, ndmi_3, dnbr_w_offset) %>% 
+  right_join(mtbs_reg1, by = c("elevation", "savi", "ndmi_3", "dnbr_w_offset")) %>% 
+  mutate(mtbs = factor(b1))
+
+
+quan_mtbs <- trial_reg %>% 
+  filter(b1 <= 5) %>%
+  group_by(mtbs, region) %>% 
+  summarise(quar25 = round(quantile(dnbr_w_offset)[2],2), 
+            quan50 = round(quantile(dnbr_w_offset)[3],2), 
+            quan75 = round(quantile(dnbr_w_offset)[4],2)) %>% 
+  ungroup()
+```
+
+
+```{r, northeast}
+
+ne<- quan_mtbs %>% 
+  filter(region == "northeast")
+
+ne_un <- trial_reg %>%
+  filter(region == "northeast" & b1 <= 5 & mtbs == 1)
+ne_low <- trial_reg %>%
+  filter(region == "northeast" & b1 <= 5 & mtbs == 2)
+ne_mod <- trial_reg %>%
+  filter(region == "northeast" & b1 <= 5 & mtbs == 3)
+ne_hi <- trial_reg %>%
+  filter(region == "northeast" & b1 <= 5 & mtbs == 4)
+ne_ig <- trial_reg %>%
+  filter(region == "northeast" & b1 <= 5 & mtbs == 5)
+
+# Empirical Cumulative Distribution Function
+ecdf_fun <- function(x,perc) ecdf(x)(perc)
+
+
+# applying for NE, control: 91.36
+# un burned 
+ecdf_fun(ne_un$dnbr_w_offset,91.36) # 0.5217391
+quantile(ne_un$dnbr_w_offset, probs = c(.521)) # 91.36 
+
+# low 
+ecdf_fun(ne_low$dnbr_w_offset,91.36) # 0.3151298
+quantile(ne_low$dnbr_w_offset, probs = c(.31512)) # 91.36 
+
+# mod 
+ecdf_fun(ne_mod$dnbr_w_offset,91.36) # 0.1203933
+quantile(ne_mod$dnbr_w_offset, probs = c(0.1203933)) # 91.36 
+
+# high
+ecdf_fun(ne_hi$dnbr_w_offset,91.36) # 0.07998384
+quantile(ne_hi$dnbr_w_offset, probs = c(0.07998384)) # 11.84
+
+
+# ig
+ecdf_fun(ne_ig$dnbr_w_offset,91.36) #0.6588235
+quantile(ne_ig$dnbr_w_offset, probs = c(0.6588235)) # 11.84
+
+
+
+# applying for NE, treatment 11.70 
+# un burned 
+ecdf_fun(ne_un$dnbr_w_offset,11.70) # 0.184548
+quantile(ne_un$dnbr_w_offset, probs = c(0.184548)) # 11.69
+
+# low 
+ecdf_fun(ne_low$dnbr_w_offset,11.70) # 0.1063968
+quantile(ne_low$dnbr_w_offset, probs = c(0.1063968)) # 11.70
+
+# mod 
+ecdf_fun(ne_mod$dnbr_w_offset,11.70) # 0.04165001
+quantile(ne_mod$dnbr_w_offset, probs = c(0.04165001)) # 11.84
+
+
+# high
+ecdf_fun(ne_hi$dnbr_w_offset,11.70) # 0.03049889
+quantile(ne_hi$dnbr_w_offset, probs = c(0.03049889)) # 11.84
+
+
+# ig
+ecdf_fun(ne_ig$dnbr_w_offset,11.70) #0.2823529
+quantile(ne_ig$dnbr_w_offset, probs = c(0.2823529)) # 11.84
+
+
+tab_df(ne,
+       title = "Descriptive statistics",
+       file = "E:/BufferCapacity/figures/MTBS_dNBR_northeast.doc")
+```
+
+```{r, northwest}
+# Northwest
+
+nw <- quan_mtbs %>% 
+  filter(region == "northwest")
+
+tab_df(nw,
+       title = "Descriptive statistics",
+       file = "E:/BufferCapacity/figures/MTBS_dNBR_northwest.doc")
+
+nw_un <- trial_reg %>%
+  filter(region == "northwest" & b1 <= 5 & mtbs == 1)
+nw_low <- trial_reg %>%
+  filter(region == "northwest" & b1 <= 5 & mtbs == 2)
+nw_mod <- trial_reg %>%
+  filter(region == "northwest" & b1 <= 5 & mtbs == 3)
+nw_hi <- trial_reg %>%
+  filter(region == "northwest" & b1 <= 5 & mtbs == 4)
+nw_ig <- trial_reg %>%
+  filter(region == "northwest" & b1 <= 5 & mtbs == 5)
+
+
+
+# applying for NW, control: 99
+nw_cont <- 99.9
+nw_treat <- -41.49
+
+
+# un burned 
+ecdf_fun(nw_un$dnbr_w_offset,nw_cont) #  0.6391141
+quantile(nw_un$dnbr_w_offset, probs = c( 0.6391141))# yes
+
+# low 
+ecdf_fun(nw_low$dnbr_w_offset,nw_cont) # 0.2317521
+quantile(nw_low$dnbr_w_offset, probs = c(0.2317521)) # yes
+
+# mod 
+ecdf_fun(nw_mod$dnbr_w_offset,nw_cont) #0.01722149 
+quantile(nw_mod$dnbr_w_offset, probs = c(0.01722149)) # yes
+
+# high
+ecdf_fun(nw_hi$dnbr_w_offset,nw_cont) # 0.001239706
+quantile(nw_hi$dnbr_w_offset, probs = c(0.001239706))  # close
+
+
+# ig
+ecdf_fun(nw_ig$dnbr_w_offset,nw_cont) #0.6588235
+quantile(nw_ig$dnbr_w_offset, probs = c(0.6588235)) 
+
+
+
+# applying for NE, treatment  
+# un burned 
+ecdf_fun(nw_un$dnbr_w_offset,nw_treat) # 0.1052007
+quantile(nw_un$dnbr_w_offset, probs = c(0.1052007)) # yes
+
+# low 
+ecdf_fun(nw_low$dnbr_w_offset,nw_treat) # 0.005661821
+quantile(nw_low$dnbr_w_offset, probs = c(0.005661821)) # yes
+
+# mod 
+ecdf_fun(nw_mod$dnbr_w_offset,nw_treat) #  0.0009063942
+quantile(nw_mod$dnbr_w_offset, probs = c( 0.0009063942)) # close
+
+
+# high
+ecdf_fun(nw_hi$dnbr_w_offset,nw_treat) # 0.0001771009
+quantile(nw_hi$dnbr_w_offset, probs = c(0.0001771009)) # yes
+
+
+# ig
+ecdf_fun(nw_ig$dnbr_w_offset,nw_treat) #0.09836066
+quantile(nw_ig$dnbr_w_offset, probs = c(0.09836066)) # not very close
+```
+
+
+
+```{r, south}
+# South
+
+south_ <- quan_mtbs %>% 
+  filter(region == "south")
+
+tab_df(south_,
+       title = "Descriptive statistics",
+       file = "E:/BufferCapacity/figures/MTBS_dNBR_south.doc")
+
+south_un <- trial_reg %>%
+  filter(region == "south" & b1 <= 5 & mtbs == 1)
+south_low <- trial_reg %>%
+  filter(region == "south" & b1 <= 5 & mtbs == 2)
+south_mod <- trial_reg %>%
+  filter(region == "south" & b1 <= 5 & mtbs == 3)
+south_hi <- trial_reg %>%
+  filter(region == "south" & b1 <= 5 & mtbs == 4)
+south_ig <- trial_reg %>%
+  filter(region == "south" & b1 <= 5 & mtbs == 5)
+
+
+# applying for south, control: 99
+south_cont <- 164.59
+south_treat <- 99.44
+
+
+# un burned 
+ecdf_fun(south_un$dnbr_w_offset,south_cont) #  0.5438623
+quantile(south_un$dnbr_w_offset, probs = c( 0.5438623))# yes
+
+# low 
+ecdf_fun(south_low$dnbr_w_offset,south_cont) # 0.3193984
+quantile(south_low$dnbr_w_offset, probs = c(0.3193984)) # yes
+
+# mod 
+ecdf_fun(south_mod$dnbr_w_offset,south_cont) # 0.1241853
+quantile(south_mod$dnbr_w_offset, probs = c(0.1241853)) # yes
+
+# high
+ecdf_fun(south_hi$dnbr_w_offset,south_cont) # 0.1217391
+quantile(south_hi$dnbr_w_offset, probs = c(0.1217391))  # yes
+
+
+# ig
+ecdf_fun(south_ig$dnbr_w_offset,south_cont) # 0.2307991
+quantile(south_ig$dnbr_w_offset, probs = c(0.2307991)) 
+
+
+
+# applying for South, treatment  
+# un burned 
+ecdf_fun(south_un$dnbr_w_offset,south_treat) # 0.4443855
+quantile(south_un$dnbr_w_offset, probs = c(0.4443855)) # yes
+
+# low 
+ecdf_fun(south_low$dnbr_w_offset,south_treat) #  0.1974509
+quantile(south_low$dnbr_w_offset, probs = c( 0.1974509)) # yes
+
+# mod 
+ecdf_fun(south_mod$dnbr_w_offset,south_treat) #  0.06138806
+quantile(south_mod$dnbr_w_offset, probs = c( 0.06138806)) # yes
+
+
+# high
+ecdf_fun(south_hi$dnbr_w_offset,south_treat) # 0.07814175
+quantile(south_hi$dnbr_w_offset, probs = c(0.07814175)) # yes
+
+
+# ig
+ecdf_fun(south_ig$dnbr_w_offset,south_treat) #0.1730023
+quantile(south_ig$dnbr_w_offset, probs = c(0.1730023)) # yes
+```
