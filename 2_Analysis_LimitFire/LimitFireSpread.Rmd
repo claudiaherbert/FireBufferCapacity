@@ -1,0 +1,186 @@
+---
+title: "LimitFireSpread"
+author: "Claudia Herbert"
+date: "2/6/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# read in packages 
+# If you have not installed these packages already, you will need to do so
+# install.packages("<insert package name>")
+library(readr)
+library(dplyr)
+library(lmtest)
+library(margins)
+library(sjPlot)
+library(ggplot2)
+library(gplots)
+library(simpleboot)
+library(tidyr)
+```
+
+
+```{r}
+# read in .rda files made from the ArcGIS Pro outputs 
+readRDS(file = "golf.rds")
+readRDS(file = "parks.rds")
+readRDS(file = "airports.rds")
+readRDS(file = "cpad_parks.rds")
+
+comb_control <- rbind(golf, airports, parks) 
+```
+
+
+## Density 
+```{r}
+#Create a custom color scale
+library(RColorBrewer)
+# library(tidyverse)
+# myColors <- brewer.pal(4,"Dark2")
+myColors <- c("#2596be","#b2df8a", "#eab676" ) #"#873e23"
+names(myColors) <- levels(comb_control$treat)
+colScale <- scale_colour_manual(name = "treat",values = myColors)
+colFill <- scale_fill_manual(name = "treat",values = myColors)
+
+ggplot(comb_control,aes(x = percentage, col = treat, fill = treat, group = treat)) + geom_histogram(alpha=0.2) +
+  theme_minimal() +
+  xlab("Proportion of Feature Burned") + 
+  colScale +
+  colFill +
+  ylab("Count") +
+  theme(legend.position = "none") +
+  facet_wrap(~treat)
+
+ggsave("E:/BufferCapacity/figures/Fig5a.jpeg",  
+       width =3.5,
+       height = 2,
+       units = c("in"),
+       dpi = 300)
+
+ggplot(comb_control,aes(x = percentage, col = treat, fill = treat, group = treat)) + geom_density(alpha=0.2) +
+  theme_minimal() +
+  xlab("Proportion of Feature Burned") + 
+  colScale +
+  colFill +
+  ylab("Density") + 
+  ggtitle("b.")
+
+ggsave("E:/BufferCapacity/figures/Fig5b.jpeg",  
+       width =3.5,
+       height = 3,
+       units = c("in"),
+       dpi = 300)
+```
+
+# box and whisker 
+```{r}
+ggplot(comb_control) +
+  aes(x = treat, y = percentage) +
+  geom_boxplot(fill = c("#2596be","#b2df8a", "#eab676" ), alpha=0.2) +
+  xlab("Landscape Feature") + 
+  theme_minimal() + 
+  ggtitle("a.")
+
+ggsave("E:/BufferCapacity/figures/Fig5c.jpeg",  
+       width =3,
+       height = 3,
+       units = c("in"),
+       dpi = 300)
+```
+
+## Shapiro test 
+- p-value cutoff is .05; landcovers with a lower p-value will be interpreted as not having a normal distribution
+```{r}
+shapiro.test(subset(comb_control, treat == "golf")$percentage)
+shapiro.test(subset(comb_control, treat == "airports")$percentage)
+shapiro.test(subset(comb_control, treat == "parks")$percentage)
+```
+
+Golf and airports are not normally distributed, making them good candidates for a test that does not assume normal distribution. 
+
+```{r}
+options(scipen = 999)
+# testing the golf and airport distribution
+wilG_A <- comb_control %>% 
+  filter(treat == "golf" | treat == "airports") 
+
+wilcox.test(wilG_A$percentage ~ wilG_A$treat, alternative = "two.sided")
+
+# open street map parks to cpad parks
+wilP_P <- comb_control %>% 
+  filter(treat == "golf" | treat == "parks") 
+
+wilcox.test(wilP_P$percentage ~ wilP_P$treat, alternative = "two.sided")
+
+```
+
+
+## Bootstrap 
+```{r}
+bootstrapped <- two.boot(parks$percentage, golf$percentage, median, 2500)
+
+bootstrapped_med_diff <- data.frame(bootstrapped$t)
+colnames(bootstrapped_med_diff) <- 'med_diffs'
+
+ggplot(bootstrapped_med_diff, aes(x=med_diffs)) + 
+  geom_histogram(bins=20, alpha=0.2) +
+  geom_vline(xintercept = bootstrapped$t0, size = 1.5) +
+  geom_vline(xintercept = quantile(bootstrapped_med_diff$med_diffs, 0.05), size = 1, linetype = 'dashed') +
+  geom_vline(xintercept = quantile(bootstrapped_med_diff$med_diffs, 0.95), size = 1, linetype = 'dashed') +
+  xlab('sample median differences') + ylab('bootstrapped count') + 
+  ggtitle("Golf and Parks Percentage") +
+  theme_minimal() + 
+  ggtitle("b.")
+
+ggsave("E:/BufferCapacity/figures/Fig6a.jpeg",  
+       width =3,
+       height = 3,
+       units = c("in"),
+       dpi = 300)
+
+
+bootstrapped.2 <- two.boot(airports$percentage, golf$percentage, median, 2500)
+
+bootstrapped_med_diff <- data.frame(bootstrapped.2$t)
+colnames(bootstrapped_med_diff) <- 'med_diffs'
+
+ggplot(bootstrapped_med_diff, aes(x=med_diffs)) + 
+  geom_histogram(bins=20, alpha=0.2) +
+  geom_vline(xintercept = bootstrapped.2$t0, size = 1.5) +
+  geom_vline(xintercept = quantile(bootstrapped_med_diff$med_diffs, 0.05), size = 1, linetype = 'dashed') +
+  geom_vline(xintercept = quantile(bootstrapped_med_diff$med_diffs, 0.95), size = 1, linetype = 'dashed') +
+  xlab('sample median differences') + ylab('bootstrapped count') + 
+  ggtitle("Golf and Airports Percentage") +
+  theme_minimal() + 
+  ggtitle("a.")
+
+ggsave("E:/BufferCapacity/figures/Fig6b.jpeg",  
+       width =3,
+       height = 3,
+       units = c("in"),
+       dpi = 300)
+
+# Checking the two parks
+bootstrapped <- two.boot(cpad_parks$percentage, parks$percentage, median, 2500)
+
+bootstrapped_median_diff <- data.frame(bootstrapped$t)
+colnames(bootstrapped_median_diff) <- 'median_diffs'
+
+ggplot(bootstrapped_median_diff, aes(x=median_diffs)) + 
+  geom_histogram(bins=20, alpha=0.8) +
+  geom_vline(xintercept = bootstrapped$t0, size = 1.5) +
+  geom_vline(xintercept = quantile(bootstrapped_median_diff$median_diffs, 0.05), size = 1, linetype = 'dashed') +
+  geom_vline(xintercept = quantile(bootstrapped_median_diff$median_diffs, 0.95), size = 1, linetype = 'dashed') +
+  xlab('sample mean differences') + ylab('bootstrapped count') + 
+  ggtitle("Golf and Parks Percentage: Median") +
+  theme_minimal()
+```
+
+
+
