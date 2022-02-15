@@ -1,6 +1,6 @@
 # Fire Buffer Capacity
 
-This repository accompanies "" paper. 
+This repository accompanies our "Golf courses reduce fire severity and limit fire spread in California" paper. 
 
 The scripts in this repository allow you to generate our source datasets and run analysis for measuring changes in fire severity (part 1) and measure potential for limiting fire spread (part 2). 
 
